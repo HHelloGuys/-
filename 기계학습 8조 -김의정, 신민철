@@ -1,0 +1,682 @@
+from sklearn.datasets import load_files
+import os
+import numpy as np
+import pandas as pd
+import re
+import matplotlib.pyplot as plt
+import nltk
+from nltk.corpus import stopwords
+from bs4 import BeautifulSoup 
+import urllib.request
+import requests
+from summa.summarizer import summarize
+
+from tensorflow.keras.preprocessing.text import Tokenizer 
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.layers import Input, LSTM, Embedding, Dense, Concatenate
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+
+# 필요한 라이브러리 임포트
+import glob
+from bs4 import BeautifulSoup
+from konlpy.tag import Okt
+
+# NLTK의 stopwords 다운로드
+nltk.download('stopwords')
+from nltk.corpus import stopwords as nltk_stopwords
+
+# Okt 토크나이저 초기화
+okt = Okt()
+
+# 한국어 불용어 목록 정의 및 다운로드
+stopwords_url = 'https://gist.githubusercontent.com/spikeekips/40eea22ef4a89f629abd87eed535ac6a/raw/4f7a635040442a995568270ac8156448f2d1f0cb/stopwords-ko.txt'
+stopwords_df = pd.read_csv(stopwords_url, header=None)
+stopwords_df[0] = stopwords_df[0].apply(lambda x: x.strip())
+stopwords = set(stopwords_df[0].to_numpy())
+stopwords_ko = set(stopwords_df[0].to_numpy())
+
+# 불용어 제거 함수
+def remove_stopwords(text, stopwords):
+    words = okt.morphs(text, stem=True)  # 형태소 분석
+    words = [word for word in words if word not in stopwords]  # 불용어 제거
+    return ' '.join(words)
+
+# 텍스트 전처리 함수
+def preprocess_text(document):
+    try:
+        # HTML 태그 제거
+        document = BeautifulSoup(document, 'html.parser').text
+        # 특수 문자 및 숫자 제거
+        document = re.sub(r'[^ㄱ-ㅎ가-힣\s]', '', document)
+        # 불용어 제거 및 형태소 분석
+        document = remove_stopwords(document, stopwords)
+    except Exception as e:
+        print(f"Error processing document: {e}")
+        document = ""
+    return document
+
+# 파일 로드 및 전처리
+def load_and_preprocess_file(file_path):
+    documents = []
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+            for line in lines:
+                clean_line = preprocess_text(line.strip())
+                documents.append(clean_line)
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+
+    return documents
+
+# 파일 경로 설정
+file_path = "F:\뉴스\뉴스 데이터.txt"
+
+# 데이터 로드 및 전처리
+documents = load_and_preprocess_file(file_path)
+
+# 데이터프레임 생성
+data = pd.DataFrame({'text': documents})
+
+# 전처리된 데이터 확인
+print("전처리된 데이터 샘플:")
+for doc in documents[:5]:
+    print(doc)
+    print()
+
+print('text 열에서 중복을 배제한 유일한 샘플의 수 :', data['text'].nunique())
+
+data.drop_duplicates(subset = ['text'], inplace = True)
+print('전체 샘플수 :',(len(data)))
+
+print(data.isnull().sum())
+
+data.dropna(axis = 0, inplace = True)
+print('전체 샘플수 :',(len(data)))
+
+contractions = {"각","각각","각자","각종","갖고말하자면","같다","같이","개의치않고","거니와","거바","거의","것","것들","게다가","게우다","겨우","견지에서","결과에 이르다","결국","결론을 낼 수 있다",
+"고려하면","고로","곧","공동으로","과","관계가 있다","관계없이","관련이 있다","관하여","관한","관해서는","구체적으로","구토하다","그","그들","그때","그래","그래서","그러나","그러니","그러니까","그러면",
+"그러므로","그러한즉","그런 까닭에","그런데","그런즉","그럼","그렇게 함으로써","그렇지","그렇지 않다면","그렇지 않으면","그렇지만","그렇지않으면","그리고","그리하여","그만이다","그에 따르는","그위에","그저",
+"그중에서","그치지 않다","근거로","근거하여","기점으로","기준으로","기타","까닭으로","까악","까지","까지 미치다","까지도","꽈당","끙끙","끼익","나","나머지는","남들","남짓","너","너희","너희들","네","넷","년",
+"논하지 않다","놀라다","누가 알겠는가","누구","다른","다른 방면으로","다만","다섯","다수","다시 말하자면","다시말하면","다음","다음에","다음으로","단지","답다","당신","당장","대로 하다","대하면","대하여",
+"대해 말하자면","대해서","댕그","더구나","더군다나","더라도","더불어","더욱이는","도달하다","동시에","동안","된바에야","된이상","두번째로","둘","둥둥","뒤따라","뒤이어","든간에","들","등","등등","딩동","따라",
+"따라서","따위","따지지 않다","딱","때가 되어","때문에","또","또한","뚝뚝","라 해도","령","로","로 인하여","로부터","로써","륙","마음대로","마저","마저도","마치","막론하고","만 못하다","만약","만약에",
+"만은 아니다","만이 아니다","만일","만큼","말하자면","말할것도 없고","매","매번","메쓰겁다","몇","모","모두","무렵","무릎쓰고","무슨","무엇","무엇때문에","물론","및","바꾸어말하면","바꾸어말하자면",
+"바꾸어서 말하면","바꾸어서 한다면","바꿔 말하면","바로","바와같이","밖에 안된다","반대로","반대로 말하자면","반드시","버금","보는데서","보다더","보드득","본대로","봐","봐라","부류의 사람들","부터","불구하고",
+"불문하고","붕붕","비걱거리다","비교적","비길수 없다","비로소","비록","비슷하다","비추어 보아","비하면","뿐만 아니라","뿐만아니라","뿐이다","삐걱","삐걱거리다","사","삼","상대적으로 말하자면","생각한대로",
+"설령","설마","설사","셋","소생","소인","솨","쉿","습니까","습니다","시각","시간","시작하여","시초에","시키다","실로","심지어","아","아니","아니나다를가","아니라면","아니면","아니었다면","아래윗","아무거나",
+"아무도","아야","아울러","아이","아이구","아이야","아이쿠","아하","아홉","안 그러면","않기 위하여","않기 위해서","알 수 있다","알았어","앗","앞에서","앞의것","야","약간","양자","어","어기여차","어느","어느 년도",
+"어느것","어느곳","어느때","어느쪽","어느해","어디","어때","어떠한","어떤것","어떤것들","어떻게","어떻해","어이","어째서","어쨋든","어쩔수 없다","어찌","어찌됏든","어찌됏어","어찌하든지","어찌하여","언제","언젠가",
+"얼마","얼마 안 되는 것","얼마간","얼마나","얼마든지","얼마만큼","얼마큼","엉엉","에","에 가서","에 달려 있다","에 대해","에 있다","에 한하다","에게","에서","여","여기","여덟","여러분","여보시오","여부","여섯",
+"여전히","여차","연관되다","연이서","영","영차","옆사람","예","예를 들면","예를 들자면","예컨대","예하면","오","오로지","오르다","오자마자","오직","오호","오히려","와","와 같은 사람들","와르르","와아","왜",
+"왜냐하면","외에도","요만큼","요만한 것","요만한걸","요컨대"}
+
+print("정규화 사전의 수: ",len(contractions))
+
+# 데이터 전처리 함수 정의
+def preprocess_sentence(sentence, remove_stopwords=True):
+    sentence = sentence.lower()  # 텍스트 소문자화
+    sentence = BeautifulSoup(sentence, "lxml").text  # HTML 태그 제거
+    sentence = re.sub(r'\([^)]*\)', '', sentence)  # 괄호로 닫힌 문자열 제거
+    sentence = re.sub('"', '', sentence)  # 쌍따옴표 제거
+    sentence = re.sub("[^ㄱ-ㅎ가-힣a-zA-Z]", " ", sentence)  # 한국어와 영어 외 문자 제거
+    sentence = re.sub('[m]{2,}', 'mm', sentence)  # m이 3개 이상이면 2개로 변경
+    
+    # 불용어 제거
+    if remove_stopwords:
+        tokens = ' '.join(word for word in sentence.split() if word not in stopwords_ko and word not in stopwords_en and len(word) > 1)
+    else:
+        tokens = ' '.join(word for word in sentence.split() if len(word) > 1)
+        
+    return tokens
+
+# 데이터 로드 및 전처리
+def load_and_preprocess_documents(data_dir):
+    all_documents = []
+
+    # 디렉토리 내 모든 .txt 파일 경로 가져오기
+    file_paths = glob.glob(os.path.join(data_dir, '*.txt'))
+
+    for file_path in file_paths:
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                document = file.read()
+                # 텍스트 전처리 함수 호출
+                clean_document = preprocess_text(document)
+                all_documents.append(clean_document)
+        except Exception as e:
+            print(f"Error reading file {file_path}: {e}")
+
+    return all_documents
+
+# 파일 로드 및 전처리
+def load_and_preprocess_file(file_path):
+    documents = []
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+            for line in lines:
+                clean_line = preprocess_text(line.strip())  # 전처리 함수 호출
+                documents.append(clean_line)
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+
+    return documents
+
+# 데이터 파일 경로 설정
+file_path = 'F:\뉴스\뉴스 데이터.txt'
+
+# 데이터 로드 및 전처리
+documents = load_and_preprocess_file(file_path)
+
+# 데이터프레임 생성
+data = pd.DataFrame({'text': documents})
+
+# 중복 샘플 제거
+data.drop_duplicates(subset=['text'], inplace=True)
+print('전체 샘플수:', len(data))
+
+# 결측치 확인 및 제거
+print(data.isnull().sum())
+data.dropna(axis=0, inplace=True)
+print('전체 샘플수:', len(data))
+
+# 길이 분포 출력
+text_len = [len(s.split()) for s in data['text']]
+
+print('텍스트의 최소 길이 : {}'.format(np.min(text_len)))
+print('텍스트의 최대 길이 : {}'.format(np.max(text_len)))
+print('텍스트의 평균 길이 : {}'.format(np.mean(text_len)))
+
+# 길이 분포 시각화
+plt.subplot(1, 2, 2)
+plt.boxplot(text_len)
+plt.title('Text Length Distribution')
+plt.ylabel('Length of Text')
+
+plt.tight_layout()
+plt.show()
+
+# 히스토그램 시각화
+plt.figure(figsize=(12, 6))
+
+plt.subplot(1, 2, 2)
+plt.hist(text_len, bins=40, color='salmon', edgecolor='black')
+plt.title('Text Length Histogram')
+plt.xlabel('Length of Text')
+plt.ylabel('Number of Samples')
+
+plt.tight_layout()
+plt.show()
+
+data.isnull().sum()
+
+text_max_len = 50
+Headline_max_len = 8
+
+def below_threshold_len(max_len, nested_list):
+  cnt = 0
+  for s in nested_list:
+    if(len(s.split()) <= max_len):
+        cnt = cnt + 1
+  print('전체 샘플 중 길이가 %s 이하인 샘플의 비율: %s'%(max_len, (cnt / len(nested_list))))
+
+below_threshold_len(text_max_len, data['text'])
+
+data = data[data['text'].apply(lambda x: len(x.split()) <= text_max_len)]
+print('전체 샘플수 :',(len(data)))
+
+# 시작 및 종료 토큰 추가
+data['decoder_input'] = data['text'].apply(lambda x: 'sostoken ' + x)
+data['decoder_target'] = data['text'].apply(lambda x: x + ' eostoken')
+
+# 결과 확인
+print(data.head())
+
+encoder_input = np.array(data['text']) # 인코더의 입력
+decoder_input = np.array(data['decoder_input']) # 디코더의 입력
+decoder_target = np.array(data['decoder_target']) # 디코더의 레이블
+
+indices = np.arange(encoder_input.shape[0])
+np.random.shuffle(indices)
+print(indices)
+
+encoder_input = encoder_input[indices]
+decoder_input = decoder_input[indices]
+decoder_target = decoder_target[indices]
+
+n_of_val = int(len(encoder_input)*0.2)
+print('테스트 데이터의 수 :',n_of_val)
+
+encoder_input_train = encoder_input[:-n_of_val]
+decoder_input_train = decoder_input[:-n_of_val]
+decoder_target_train = decoder_target[:-n_of_val]
+
+encoder_input_test = encoder_input[-n_of_val:]
+decoder_input_test = decoder_input[-n_of_val:]
+decoder_target_test = decoder_target[-n_of_val:]
+
+print('훈련 데이터의 개수 :', len(encoder_input_train))
+print('훈련 레이블의 개수 :',len(decoder_input_train))
+print('테스트 데이터의 개수 :',len(encoder_input_test))
+print('테스트 레이블의 개수 :',len(decoder_input_test))
+
+src_tokenizer = Tokenizer() # 토크나이저 정의
+src_tokenizer.fit_on_texts(encoder_input_train) # 입력된 데이터로부터 단어 집합 생성
+
+threshold = 7
+total_cnt = len(src_tokenizer.word_index) # 단어의 수
+rare_cnt = 0 # 등장 빈도수가 threshold보다 작은 단어의 개수를 카운트
+total_freq = 0 # 훈련 데이터의 전체 단어 빈도수 총 합
+rare_freq = 0 # 등장 빈도수가 threshold보다 작은 단어의 등장 빈도수의 총 합
+
+# 단어와 빈도수의 쌍(pair)을 key와 value로 받는다.
+for key, value in src_tokenizer.word_counts.items():
+    total_freq = total_freq + value
+
+    # 단어의 등장 빈도수가 threshold보다 작으면
+    if(value < threshold):
+        rare_cnt = rare_cnt + 1
+        rare_freq = rare_freq + value
+
+print('단어 집합(vocabulary)의 크기 :',total_cnt)
+print('등장 빈도가 %s번 이하인 희귀 단어의 수: %s'%(threshold - 1, rare_cnt))
+print('단어 집합에서 희귀 단어를 제외시킬 경우의 단어 집합의 크기 %s'%(total_cnt - rare_cnt))
+
+# ZeroDivisionError 방지를 위한 조건문 추가
+if total_cnt > 0:
+    print("단어 집합에서 희귀 단어의 비율:", (rare_cnt / total_cnt) * 100)
+else:
+    print("단어 집합의 크기가 0입니다. 희귀 단어의 비율을 계산할 수 없습니다.")
+
+if total_freq > 0:
+    print("전체 등장 빈도에서 희귀 단어 등장 빈도 비율:", (rare_freq / total_freq) * 100)
+else:
+    print("전체 등장 빈도수가 0입니다. 희귀 단어 등장 빈도 비율을 계산할 수 없습니다.")
+
+src_vocab = 8000
+src_tokenizer = Tokenizer(num_words = src_vocab) # 단어 집합의 크기를 8,000으로 제한
+src_tokenizer.fit_on_texts(encoder_input_train) # 단어 집합 재생성.
+
+# 텍스트 시퀀스를 정수 시퀀스로 변환
+encoder_input_train = src_tokenizer.texts_to_sequences(encoder_input_train) 
+encoder_input_test = src_tokenizer.texts_to_sequences(encoder_input_test)
+
+#잘 진행되었는지 샘플 출력
+print(encoder_input_train[:3])
+
+tar_tokenizer = Tokenizer()
+tar_tokenizer.fit_on_texts(decoder_input_train)
+
+threshold = 6
+total_cnt = len(tar_tokenizer.word_index) # 단어의 수
+rare_cnt = 0 # 등장 빈도수가 threshold보다 작은 단어의 개수를 카운트
+total_freq = 0 # 훈련 데이터의 전체 단어 빈도수 총 합
+rare_freq = 0 # 등장 빈도수가 threshold보다 작은 단어의 등장 빈도수의 총 합
+
+# 단어와 빈도수의 쌍(pair)을 key와 value로 받는다.
+for key, value in tar_tokenizer.word_counts.items():
+    total_freq = total_freq + value
+
+    # 단어의 등장 빈도수가 threshold보다 작으면
+    if(value < threshold):
+        rare_cnt = rare_cnt + 1
+        rare_freq = rare_freq + value
+
+print('단어 집합(vocabulary)의 크기 :',total_cnt)
+print('등장 빈도가 %s번 이하인 희귀 단어의 수: %s'%(threshold - 1, rare_cnt))
+print('단어 집합에서 희귀 단어를 제외시킬 경우의 단어 집합의 크기 %s'%(total_cnt - rare_cnt))
+
+# ZeroDivisionError 방지를 위한 조건문 추가
+if total_cnt > 0:
+    print("단어 집합에서 희귀 단어의 비율:", (rare_cnt / total_cnt) * 100)
+else:
+    print("단어 집합의 크기가 0입니다. 희귀 단어의 비율을 계산할 수 없습니다.")
+
+if total_freq > 0:
+    print("전체 등장 빈도에서 희귀 단어 등장 빈도 비율:", (rare_freq / total_freq) * 100)
+else:
+    print("전체 등장 빈도수가 0입니다. 희귀 단어 등장 빈도 비율을 계산할 수 없습니다.")
+
+tar_vocab = 2000
+tar_tokenizer = Tokenizer(num_words = tar_vocab) 
+tar_tokenizer.fit_on_texts(decoder_input_train)
+tar_tokenizer.fit_on_texts(decoder_target_train)
+
+# 텍스트 시퀀스를 정수 시퀀스로 변환
+decoder_input_train = tar_tokenizer.texts_to_sequences(decoder_input_train) 
+decoder_target_train = tar_tokenizer.texts_to_sequences(decoder_target_train)
+decoder_input_test = tar_tokenizer.texts_to_sequences(decoder_input_test)
+decoder_target_test = tar_tokenizer.texts_to_sequences(decoder_target_test)
+
+#잘 변환되었는지 확인
+print('input')
+print('input ',decoder_input_train[:5])
+print('target')
+print('decoder ',decoder_target_train[:5])
+
+# 삭제할 인덱스 계산
+drop_train = [index for index, sentence in enumerate(decoder_input_train) if len(sentence) == 1]
+drop_test = [index for index, sentence in enumerate(decoder_input_test) if len(sentence) == 1]
+
+print('삭제할 훈련 데이터의 개수 :', len(drop_train))
+print('삭제할 테스트 데이터의 개수 :', len(drop_test))
+
+# NumPy 배열로 변환하기 전에 리스트에서 삭제
+if len(drop_train) > 0:
+    encoder_input_train = [sentence for index, sentence in enumerate(encoder_input_train) if index not in drop_train]
+    decoder_input_train = [sentence for index, sentence in enumerate(decoder_input_train) if index not in drop_train]
+    decoder_target_train = [sentence for index, sentence in enumerate(decoder_target_train) if index not in drop_train]
+
+if len(drop_test) > 0:
+    encoder_input_test = [sentence for index, sentence in enumerate(encoder_input_test) if index not in drop_test]
+    decoder_input_test = [sentence for index, sentence in enumerate(decoder_input_test) if index not in drop_test]
+    decoder_target_test = [sentence for index, sentence in enumerate(decoder_target_test) if index not in drop_test]
+
+# 리스트를 NumPy 배열로 변환
+encoder_input_train = np.array(encoder_input_train, dtype=object)
+decoder_input_train = np.array(decoder_input_train, dtype=object)
+decoder_target_train = np.array(decoder_target_train, dtype=object)
+
+encoder_input_test = np.array(encoder_input_test, dtype=object)
+decoder_input_test = np.array(decoder_input_test, dtype=object)
+decoder_target_test = np.array(decoder_target_test, dtype=object)
+
+# 결과 출력
+print('훈련 데이터의 개수 :', len(encoder_input_train))
+print('훈련 레이블의 개수 :', len(decoder_input_train))
+print('테스트 데이터의 개수 :', len(encoder_input_test))
+print('테스트 레이블의 개수 :', len(decoder_input_test))
+
+encoder_input_train = pad_sequences(encoder_input_train, maxlen = text_max_len, padding='post')
+encoder_input_test = pad_sequences(encoder_input_test, maxlen = text_max_len, padding='post')
+decoder_input_train = pad_sequences(decoder_input_train, maxlen = Headline_max_len, padding='post')
+decoder_target_train = pad_sequences(decoder_target_train, maxlen = Headline_max_len, padding='post')
+decoder_input_test = pad_sequences(decoder_input_test, maxlen = Headline_max_len, padding='post')
+decoder_target_test = pad_sequences(decoder_target_test, maxlen = Headline_max_len, padding='post')
+
+# 인코더 설계 시작
+embedding_dim = 128
+hidden_size = 256
+
+# 인코더
+encoder_inputs = Input(shape=(text_max_len,))
+
+# 인코더의 임베딩 층
+enc_emb = Embedding(src_vocab, embedding_dim)(encoder_inputs)
+
+# 인코더의 LSTM 1
+encoder_lstm1 = LSTM(hidden_size, return_sequences=True, return_state=True ,dropout = 0.4, recurrent_dropout = 0.4)
+encoder_output1, state_h1, state_c1 = encoder_lstm1(enc_emb)
+
+# 인코더의 LSTM 2
+encoder_lstm2 = LSTM(hidden_size, return_sequences=True, return_state=True, dropout=0.4, recurrent_dropout=0.4)
+encoder_output2, state_h2, state_c2 = encoder_lstm2(encoder_output1)
+
+# 인코더의 LSTM 3
+encoder_lstm3 = LSTM(hidden_size, return_state=True, return_sequences=True, dropout=0.4, recurrent_dropout=0.4)
+encoder_outputs, state_h, state_c= encoder_lstm3(encoder_output2)
+
+# 디코더 설계
+decoder_inputs = Input(shape=(None,))
+
+# 디코더의 임베딩 층
+dec_emb_layer = Embedding(tar_vocab, embedding_dim)
+dec_emb = dec_emb_layer(decoder_inputs)
+
+# 디코더의 LSTM
+decoder_lstm = LSTM(hidden_size, return_sequences = True, return_state = True, dropout = 0.4, recurrent_dropout=0.2)
+decoder_outputs, _, _ = decoder_lstm(dec_emb, initial_state = [state_h, state_c])
+
+# 디코더의 출력층
+decoder_softmax_layer = Dense(tar_vocab, activation = 'softmax')
+decoder_softmax_outputs = decoder_softmax_layer(decoder_outputs) 
+
+# 모델 정의
+model = Model([encoder_inputs, decoder_inputs], decoder_softmax_outputs)
+model.summary()
+
+urllib.request.urlretrieve("https://raw.githubusercontent.com/thushv89/attention_keras/master/src/layers/attention.py", filename="attention.py")
+from attention import AttentionLayer
+
+# 어텐션 층(어텐션 함수)
+attn_layer = AttentionLayer(name='attention_layer')
+# 인코더와 디코더의 모든 time step의 hidden state를 어텐션 층에 전달하고 결과를 리턴
+attn_out, attn_states = attn_layer([encoder_outputs, decoder_outputs])
+
+# 어텐션의 결과와 디코더의 hidden state들을 연결
+decoder_concat_input = Concatenate(axis = -1, name='concat_layer')([decoder_outputs, attn_out])
+
+# 디코더의 출력층
+decoder_softmax_layer = Dense(tar_vocab, activation='softmax')
+decoder_softmax_outputs = decoder_softmax_layer(decoder_concat_input)
+
+# 모델 정의
+model = Model([encoder_inputs, decoder_inputs], decoder_softmax_outputs)
+model.summary()
+
+model.compile(optimizer='rmsprop', loss='sparse_categorical_crossentropy')
+es = EarlyStopping(monitor='val_loss', mode='min', verbose=1, patience = 2)
+history = model.fit(x = [encoder_input_train, decoder_input_train], y = decoder_target_train, \
+          validation_data = ([encoder_input_test, decoder_input_test], decoder_target_test),
+          batch_size = 256, callbacks=[es], epochs = 100)
+
+plt.plot(history.history['loss'], label='train')
+plt.plot(history.history['val_loss'], label='test')
+plt.legend()
+plt.show()
+
+src_index_to_word = src_tokenizer.index_word # 원문 단어 집합에서 정수 -> 단어를 얻음
+tar_word_to_index = tar_tokenizer.word_index # 요약 단어 집합에서 단어 -> 정수를 얻음
+tar_index_to_word = tar_tokenizer.index_word # 요약 단어 집합에서 정수 -> 단어를 얻음
+
+# 인코더 설계
+encoder_model = Model(inputs=encoder_inputs, outputs=[encoder_outputs, state_h, state_c])
+
+# 이전 시점의 상태들을 저장하는 텐서
+decoder_state_input_h = Input(shape=(hidden_size,))
+decoder_state_input_c = Input(shape=(hidden_size,))
+
+dec_emb2 = dec_emb_layer(decoder_inputs)
+# 문장의 다음 단어를 예측하기 위해서 초기 상태(initial_state)를 이전 시점의 상태로 사용. 이는 뒤의 함수 decode_sequence()에 구현
+# 훈련 과정에서와 달리 LSTM의 리턴하는 은닉 상태와 셀 상태인 state_h와 state_c를 버리지 않음.
+decoder_outputs2, state_h2, state_c2 = decoder_lstm(dec_emb2, initial_state=[decoder_state_input_h, decoder_state_input_c])
+
+# 인코더 설계
+encoder_model = Model(inputs=encoder_inputs, outputs=[encoder_outputs, state_h, state_c])
+
+# 이전 시점의 상태들을 저장하는 텐서
+decoder_state_input_h = Input(shape=(hidden_size,))
+decoder_state_input_c = Input(shape=(hidden_size,))
+
+dec_emb2 = dec_emb_layer(decoder_inputs)
+# 문장의 다음 단어를 예측하기 위해서 초기 상태(initial_state)를 이전 시점의 상태로 사용. 이는 뒤의 함수 decode_sequence()에 구현
+# 훈련 과정에서와 달리 LSTM의 리턴하는 은닉 상태와 셀 상태인 state_h와 state_c를 버리지 않음.
+decoder_outputs2, state_h2, state_c2 = decoder_lstm(dec_emb2, initial_state=[decoder_state_input_h, decoder_state_input_c])
+
+# 어텐션 함수
+decoder_hidden_state_input = Input(shape=(text_max_len, hidden_size))
+attn_out_inf, attn_states_inf = attn_layer([decoder_hidden_state_input, decoder_outputs2])
+decoder_inf_concat = Concatenate(axis=-1, name='concat')([decoder_outputs2, attn_out_inf])
+
+# 디코더의 출력층
+decoder_outputs2 = decoder_softmax_layer(decoder_inf_concat) 
+
+# 최종 디코더 모델
+decoder_model = Model(
+    [decoder_inputs] + [decoder_hidden_state_input,decoder_state_input_h, decoder_state_input_c],
+    [decoder_outputs2] + [state_h2, state_c2])
+
+def decode_sequence(input_seq):
+    # 입력으로부터 인코더의 상태를 얻음
+    e_out, e_h, e_c = encoder_model.predict(input_seq)
+
+     # <SOS>에 해당하는 토큰 생성
+    target_seq = np.zeros((1,1))
+    target_seq[0, 0] = tar_word_to_index['sostoken']
+
+    stop_condition = False
+    decoded_sentence = ''
+    while not stop_condition: # stop_condition이 True가 될 때까지 루프 반복
+
+        output_tokens, h, c = decoder_model.predict([target_seq] + [e_out, e_h, e_c])
+        sampled_token_index = np.argmax(output_tokens[0, -1, :])
+        sampled_token = tar_index_to_word[sampled_token_index]
+
+        if(sampled_token!='eostoken'):
+            decoded_sentence += ' '+sampled_token
+
+        #  <eos>에 도달하거나 최대 길이를 넘으면 중단.
+        if (sampled_token == 'eostoken'  or len(decoded_sentence.split()) >= (Headline_max_len-1)):
+            stop_condition = True
+
+        # 길이가 1인 타겟 시퀀스를 업데이트
+        target_seq = np.zeros((1,1))
+        target_seq[0, 0] = sampled_token_index
+
+        # 상태를 업데이트 합니다.
+        e_h, e_c = h, c
+
+    return decoded_sentence
+
+# 원문의 정수 시퀀스를 텍스트 시퀀스로 변환
+def seq2text(input_seq):
+    temp=''
+    for i in input_seq:
+        if(i!=0):
+            temp = temp + src_index_to_word[i]+' '
+    return temp
+
+# 요약문의 정수 시퀀스를 텍스트 시퀀스로 변환
+def seq2summary(input_seq):
+    temp=''
+    for i in input_seq:
+        if((i!=0 and i!=tar_word_to_index['sostoken']) and i!=tar_word_to_index['eostoken']):
+            temp = temp + tar_index_to_word[i] + ' '
+    return temp
+
+for i in range(50, 100):
+    print("원문 :", seq2text(encoder_input_test[i]))
+    print("실제 요약 :", seq2summary(decoder_input_test[i]))
+    print("예측 요약 :", decode_sequence(encoder_input_test[i].reshape(1, text_max_len)))
+    print("\n")
+
+# 파일 읽기 및 변환
+file_path = 'F:\뉴스\뉴스 데이터.txt'  # 로컬 파일 경로
+data = []
+
+with open(file_path, 'r', encoding='utf-8') as file:
+    entry = {}
+    for line in file:
+        if line.startswith("Headline:"):
+            if entry:
+                data.append(entry)  # 이전 entry 저장
+                entry = {}
+            entry['Headline'] = line.replace("Headline: ", "").strip()  # 'Headline' 열
+        elif line.startswith("Context:"):
+            entry['text'] = line.replace("Context: ", "").strip()  # 'text' 열
+    if entry:  # 마지막 entry 추가
+        data.append(entry)
+
+# Pandas 데이터프레임 생성
+df = pd.DataFrame(data)
+
+# CSV 파일로 저장
+df.to_csv('news_dataset.csv', index=False, encoding='utf-8-sig')  # UTF-8로 저장
+print("CSV 파일 저장 완료: news_dataset.csv")
+
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.text_rank import TextRankSummarizer
+
+# Pandas 출력 설정 변경
+pd.set_option('display.max_colwidth', None)
+
+# Sumy 기반 요약 함수 정의
+def extract_summary_sumy(text, sentence_count=2):
+    """
+    Sumy 라이브러리를 사용한 텍스트 요약 함수.
+    Args:
+        text (str): 요약할 텍스트
+        sentence_count (int): 요약문에 포함될 문장 수
+
+    Returns:
+        str: 요약된 텍스트
+    """
+    try:
+        # Sumy의 요약을 위한 파서 및 토크나이저 설정
+        parser = PlaintextParser.from_string(text, Tokenizer("korean"))
+        summarizer = TextRankSummarizer()
+
+        # 지정한 문장 수만큼 요약
+        summary = summarizer(parser.document, sentence_count)
+        return ' '.join(str(sentence) for sentence in summary)
+    except Exception as e:
+        # 예외 발생 시 "요약 불가" 반환
+        return "요약 불가"
+
+# 데이터프레임에 새로운 열 추가
+df['extractive_summary'] = df['text'].apply(lambda x: extract_summary_sumy(x, sentence_count=3))
+
+# 확인: 헤드라인, 원문, 추출 요약 출력
+print(df[['Headline', 'text', 'extractive_summary']].head())
+
+from rouge_score import rouge_scorer
+
+# ROUGE 점수 평가 함수
+def evaluate_rouge(df, reference_column='actual_summary', predicted_column='predicted_summary'):
+
+    # ROUGE 점수를 계산할 scorer 초기화
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+
+    # 결과 저장용 리스트
+    rouge1_scores = []
+    rouge2_scores = []
+    rougeL_scores = []
+
+    # 각 행별로 ROUGE 점수 계산
+    for i, row in df.iterrows():
+        reference = str(row[reference_column])
+        predicted = str(row[predicted_column])
+        
+        # ROUGE 점수 계산
+        scores = scorer.score(reference, predicted)
+        
+        # 각 ROUGE 점수를 리스트에 저장
+        rouge1_scores.append(scores['rouge1'])
+        rouge2_scores.append(scores['rouge2'])
+        rougeL_scores.append(scores['rougeL'])
+
+    # 평균 Precision, Recall, F1-Score 계산
+    def average_scores(scores):
+        precision = sum(score.precision for score in scores) / len(scores)
+        recall = sum(score.recall for score in scores) / len(scores)
+        fmeasure = sum(score.fmeasure for score in scores) / len(scores)
+        return {'precision': precision, 'recall': recall, 'f1': fmeasure}
+
+    rouge1_avg = average_scores(rouge1_scores)
+    rouge2_avg = average_scores(rouge2_scores)
+    rougeL_avg = average_scores(rougeL_scores)
+
+    # 결과 반환
+    return {
+        'ROUGE-1': rouge1_avg,
+        'ROUGE-2': rouge2_avg,
+        'ROUGE-L': rougeL_avg
+    }
+
+# 열 이름 확인 및 필요한 열 추가
+if 'actual_summary' not in df.columns:
+    df['actual_summary'] = df['Headline']  # 실제 요약 열 생성
+
+if 'predicted_summary' not in df.columns:
+    df['predicted_summary'] = df['text'].apply(lambda x: extract_summary(x))  # 예측 요약 열 생성
+
+# ROUGE 평가
+rouge_results = evaluate_rouge(df, reference_column='actual_summary', predicted_column='predicted_summary')
+print("ROUGE 평가 결과:")
+for key, value in rouge_results.items():
+    print(f"{key}: 정밀도={value['precision']:.4f}, 재현율={value['recall']:.4f}, 평균 점수={value['f1']:.4f}")
